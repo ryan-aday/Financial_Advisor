@@ -146,27 +146,94 @@ def sanitize_number(value: Any) -> float:
 
 
 def extract_first_json_block(text: str) -> Optional[Dict[str, Any]]:
-    decoder = json.JSONDecoder()
-    idx = 0
-    while idx < len(text):
-        if text[idx] != "{" and text[idx] != "[":
-            idx += 1
+    """Locate the first balanced JSON object/array in the text."""
+
+    if not text:
+        return None
+
+    stack: List[str] = []
+    start_idx: Optional[int] = None
+    in_string = False
+    escape = False
+
+    for idx, char in enumerate(text):
+        if start_idx is None:
+            if char in "{[":
+                start_idx = idx
+                stack.append("}" if char == "{" else "]")
             continue
-        try:
-            obj, end = decoder.raw_decode(text[idx:])
-        except json.JSONDecodeError:
-            idx += 1
+
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
             continue
-        return obj
+
+        if char == '"':
+            in_string = True
+            continue
+
+        if char in "{[":
+            stack.append("}" if char == "{" else "]")
+            continue
+
+        if char in "}]":
+            if not stack or char != stack[-1]:
+                # Malformed JSON segment; reset search
+                stack.clear()
+                start_idx = None
+                in_string = False
+                escape = False
+                continue
+            stack.pop()
+            if not stack and start_idx is not None:
+                candidate = text[start_idx : idx + 1]
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    # Continue searching for the next balanced candidate
+                    start_idx = None
+                    in_string = False
+                    escape = False
+                    continue
+
     return None
+
+
+def coerce_message_content(message: Dict[str, Any]) -> str:
+    """Normalize OpenAI-compatible message content to a plain string."""
+
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        pieces: List[str] = []
+        for part in content:
+            if isinstance(part, str):
+                pieces.append(part)
+            elif isinstance(part, dict) and part.get("type") == "text":
+                pieces.append(part.get("text", ""))
+        return "".join(pieces)
+
+    return ""
 
 
 def parse_advisor_response(raw: Dict[str, Any]) -> AdvisorResponse:
     message = raw.get("choices", [{}])[0].get("message", {})
-    content = message.get("content", "")
+    content = coerce_message_content(message)
     parsed = extract_first_json_block(content)
     if not parsed:
-        raise ValueError("LLM response did not contain valid JSON.")
+        preview = content.strip()
+        if len(preview) > 500:
+            preview = preview[:500] + "..."
+        raise ValueError(
+            "LLM response did not contain valid JSON. Received content preview: "
+            f"{preview}"
+        )
 
     budget_items = [
         AdvisorBudgetItem(
