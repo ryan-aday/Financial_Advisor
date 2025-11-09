@@ -442,14 +442,8 @@ def build_pdf_report(
         ("Other assets", format_currency(profile.other_assets)),
         ("Total debt", format_currency(profile.total_debt)),
         ("Net worth", format_currency(profile.net_worth)),
-        (
-            "Monthly take-home estimate",
-            format_currency(profile.monthly_income),
-        ),
-        (
-            "Monthly recurring costs",
-            format_currency(profile.recurring_costs),
-        ),
+        ("Monthly take-home estimate", format_currency(profile.monthly_income)),
+        ("Monthly recurring costs", format_currency(profile.recurring_costs)),
     ]
 
     for label, value in profile_rows:
@@ -1314,12 +1308,8 @@ def render_summary(profile: FinancialProfile) -> None:
     col2.metric("Total Debt", f"${profile.total_debt:,.0f}")
     col3.metric("Net Worth", f"${profile.net_worth:,.0f}")
 
-    st.markdown(
-        (
-            f"**Monthly take-home estimate:** ${profile.monthly_income:,.0f}  "
-            f"•  **Recurring costs:** ${profile.recurring_costs:,.0f}"
-        )
-    )
+    st.markdown((f"Monthly take-home estimate: ${profile.monthly_income:,.0f}"))
+    st.markdown((f"Recurring costs: ${profile.recurring_costs:,.0f}"))
 
     if profile.estate_documents:
         st.caption(f"Estate planning documents noted: {profile.estate_documents}")
