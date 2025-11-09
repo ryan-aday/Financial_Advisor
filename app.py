@@ -115,6 +115,90 @@ class LLMSettings:
     max_tokens: int
 
 
+PROFILE_SESSION_DEFAULTS: Dict[str, Any] = {
+    "profile_age": 18,
+    "profile_profession": "",
+    "profile_income": 0,
+    "profile_address": "",
+    "profile_education": "Bachelor's",
+    "profile_liquid_assets": 0.0,
+    "profile_investment_assets": 0.0,
+    "profile_real_estate_assets": 0.0,
+    "profile_primary_residence_value": 0.0,
+    "profile_other_assets": 0.0,
+    "profile_mortgage_debt": 0.0,
+    "profile_student_debt": 0.0,
+    "profile_credit_card_debt": 0.0,
+    "profile_other_debt": 0.0,
+    "profile_monthly_essential": 0.0,
+    "profile_monthly_discretionary": 0.0,
+    "profile_monthly_insurance": 0.0,
+    "profile_monthly_other": 0.0,
+    "profile_dependents": 0,
+    "profile_estate_documents": "",
+    "profile_planning_mode": "Risk profile",
+    "profile_risk_appetite": "Moderate",
+    "profile_target_type": "Monthly savings amount",
+    "profile_target_savings_amount": 0.0,
+    "profile_target_savings_rate": 10.0,
+    "profile_llm_notes": "",
+}
+
+
+PROFILE_EXPORT_MAP: Dict[str, str] = {
+    "profile_age": "age",
+    "profile_profession": "profession",
+    "profile_income": "income",
+    "profile_address": "address",
+    "profile_education": "education",
+    "profile_liquid_assets": "liquid_assets",
+    "profile_investment_assets": "investment_assets",
+    "profile_real_estate_assets": "real_estate_assets",
+    "profile_primary_residence_value": "primary_residence_value",
+    "profile_other_assets": "other_assets",
+    "profile_mortgage_debt": "mortgage_debt",
+    "profile_student_debt": "student_debt",
+    "profile_credit_card_debt": "credit_card_debt",
+    "profile_other_debt": "other_debt",
+    "profile_monthly_essential": "monthly_essential_expenses",
+    "profile_monthly_discretionary": "monthly_discretionary_expenses",
+    "profile_monthly_insurance": "monthly_insurance_costs",
+    "profile_monthly_other": "monthly_other_costs",
+    "profile_dependents": "dependents",
+    "profile_estate_documents": "estate_documents",
+    "profile_planning_mode": "planning_mode",
+    "profile_risk_appetite": "risk_appetite",
+    "profile_target_type": "target_type",
+    "profile_target_savings_amount": "target_savings_amount",
+    "profile_target_savings_rate": "target_savings_rate",
+    "profile_llm_notes": "llm_notes",
+}
+
+
+PROFILE_IMPORT_MAP: Dict[str, str] = {
+    external: internal for internal, external in PROFILE_EXPORT_MAP.items()
+}
+
+
+def ensure_profile_state_defaults() -> None:
+    pending_profile = st.session_state.pop("pending_profile_settings", None)
+    for key, default in PROFILE_SESSION_DEFAULTS.items():
+        st.session_state.setdefault(key, default)
+    if pending_profile:
+        for key, value in pending_profile.items():
+            if key in PROFILE_SESSION_DEFAULTS:
+                st.session_state[key] = value
+
+
+def export_profile_settings() -> Dict[str, Any]:
+    snapshot: Dict[str, Any] = {}
+    for session_key, external_key in PROFILE_EXPORT_MAP.items():
+        snapshot[external_key] = st.session_state.get(
+            session_key, PROFILE_SESSION_DEFAULTS[session_key]
+        )
+    return snapshot
+
+
 class LLMClient:
     """Minimal client for OpenAI-compatible chat endpoints (vLLM, Ollama, etc.)."""
 
@@ -498,11 +582,19 @@ def render_llm_settings() -> LLMSettings:
         "llm_model": "",
         "llm_api_key": "",
         "llm_temperature": 0.2,
-        "llm_max_tokens": 4096,
+        "llm_max_tokens": 6000,
         "show_load_settings": False,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
+
+    pending_settings = st.session_state.pop("pending_llm_settings", None)
+    if pending_settings:
+        for key, value in pending_settings.items():
+            st.session_state[key] = value
+
+    if st.session_state.pop("settings_loaded_success", False):
+        st.sidebar.success("Settings loaded.")
 
     base_url = st.sidebar.text_input(
         "Base URL",
@@ -538,7 +630,7 @@ def render_llm_settings() -> LLMSettings:
             "Max tokens",
             min_value=256,
             max_value=8192,
-            value=int(st.session_state.get("llm_max_tokens", 4096)),
+            value=int(st.session_state.get("llm_max_tokens", 6000)),
             key="llm_max_tokens",
             step=256,
             help="Upper bound for response length.",
@@ -560,13 +652,37 @@ def render_llm_settings() -> LLMSettings:
         if uploaded is not None:
             try:
                 loaded = json.loads(uploaded.getvalue().decode("utf-8"))
-                st.session_state["llm_base_url"] = loaded.get("base_url", st.session_state["llm_base_url"])
-                st.session_state["llm_model"] = loaded.get("model", st.session_state["llm_model"])
-                st.session_state["llm_api_key"] = loaded.get("api_key", st.session_state["llm_api_key"])
-                st.session_state["llm_temperature"] = float(loaded.get("temperature", st.session_state["llm_temperature"]))
-                st.session_state["llm_max_tokens"] = int(loaded.get("max_tokens", st.session_state["llm_max_tokens"]))
-                st.sidebar.success("Settings loaded.")
+                llm_blob = loaded.get("llm") if "llm" in loaded else loaded
+                profile_blob = loaded.get("profile", {})
+
+                st.session_state["pending_llm_settings"] = {
+                    "llm_base_url": llm_blob.get("base_url", st.session_state["llm_base_url"]),
+                    "llm_model": llm_blob.get("model", st.session_state["llm_model"]),
+                    "llm_api_key": llm_blob.get("api_key", st.session_state["llm_api_key"]),
+                    "llm_temperature": float(
+                        llm_blob.get("temperature", st.session_state["llm_temperature"])
+                    ),
+                    "llm_max_tokens": int(
+                        llm_blob.get("max_tokens", st.session_state["llm_max_tokens"])
+                    ),
+                }
+
+                profile_settings: Dict[str, Any] = {}
+                if isinstance(profile_blob, dict):
+                    for key, value in profile_blob.items():
+                        session_key = PROFILE_IMPORT_MAP.get(key)
+                        if session_key:
+                            profile_settings[session_key] = value
+
+                if not profile_settings:
+                    for key, value in loaded.items():
+                        if key in PROFILE_SESSION_DEFAULTS:
+                            profile_settings[key] = value
+
+                if profile_settings:
+                    st.session_state["pending_profile_settings"] = profile_settings
                 st.session_state["show_load_settings"] = False
+                st.session_state["settings_loaded_success"] = True
                 st.experimental_rerun()
             except Exception as exc:  # pragma: no cover - surface load errors to UI
                 st.sidebar.error(f"Failed to load settings: {exc}")
@@ -576,14 +692,20 @@ def render_llm_settings() -> LLMSettings:
         "model": st.session_state.get("llm_model", ""),
         "api_key": st.session_state.get("llm_api_key", ""),
         "temperature": float(st.session_state.get("llm_temperature", 0.2)),
-        "max_tokens": int(st.session_state.get("llm_max_tokens", 4096)),
+        "max_tokens": int(st.session_state.get("llm_max_tokens", 6000)),
     }
 
     with actions_col2:
         st.download_button(
             "Save Settings",
-            data=json.dumps(current_settings, indent=2),
-            file_name="advisor_llm_settings.json",
+            data=json.dumps(
+                {
+                    "llm": current_settings,
+                    "profile": export_profile_settings(),
+                },
+                indent=2,
+            ),
+            file_name="advisor_settings.json",
             mime="application/json",
         )
 
@@ -605,75 +727,213 @@ def render_llm_settings() -> LLMSettings:
 
 def collect_user_inputs() -> FinancialProfile:
     st.header("Household Profile")
+
+    education_options = ["High School", "Associate", "Bachelor's", "Master's", "Doctorate"]
+    planning_mode_options = ["Risk profile", "Custom savings target"]
+    risk_options = ["Conservative", "Moderate", "Aggressive"]
+    target_type_options = ["Monthly savings amount", "Percentage of income"]
+
     with st.form("profile_form"):
         col1, col2 = st.columns(2)
-        age = col1.number_input("Age", min_value=18, max_value=100, value=18)
-        profession = col2.text_input("Profession")
-        income = col1.number_input("Annual Income (USD)", min_value=0, value=0, step=1000)
-        address = col2.text_input("City, State (e.g. Austin, TX)")
+        age = col1.number_input(
+            "Age",
+            min_value=18,
+            max_value=100,
+            value=int(st.session_state.get("profile_age", 18)),
+            key="profile_age",
+        )
+        profession = col2.text_input(
+            "Profession",
+            value=st.session_state.get("profile_profession", ""),
+            key="profile_profession",
+        )
+        income = col1.number_input(
+            "Annual Income (USD)",
+            min_value=0,
+            value=int(st.session_state.get("profile_income", 0)),
+            step=1000,
+            key="profile_income",
+        )
+        address = col2.text_input(
+            "City, State (e.g. Austin, TX)",
+            value=st.session_state.get("profile_address", ""),
+            key="profile_address",
+        )
+
+        education_value = st.session_state.get("profile_education", education_options[2])
+        education_index = (
+            education_options.index(education_value)
+            if education_value in education_options
+            else 2
+        )
         education = col1.selectbox(
             "Highest Education Level",
-            ["High School", "Associate", "Bachelor's", "Master's", "Doctorate"],
-            index=2,
+            education_options,
+            index=education_index,
+            key="profile_education",
         )
 
         st.subheader("Assets")
-        liquid_assets = st.number_input("Liquid Assets (cash, savings)", min_value=0.0, value=0.0, step=1000.0)
+        liquid_assets = st.number_input(
+            "Liquid Assets (cash, savings)",
+            min_value=0.0,
+            value=float(st.session_state.get("profile_liquid_assets", 0.0)),
+            step=1000.0,
+            key="profile_liquid_assets",
+        )
         investment_assets = st.number_input(
-            "Investment Assets (retirement, brokerage)", min_value=0.0, value=0.0, step=1000.0
+            "Investment Assets (retirement, brokerage)",
+            min_value=0.0,
+            value=float(st.session_state.get("profile_investment_assets", 0.0)),
+            step=1000.0,
+            key="profile_investment_assets",
         )
         real_estate_assets = st.number_input(
-            "Real Estate Equity", min_value=0.0, value=0.0, step=5000.0
+            "Real Estate Equity",
+            min_value=0.0,
+            value=float(st.session_state.get("profile_real_estate_assets", 0.0)),
+            step=5000.0,
+            key="profile_real_estate_assets",
         )
         primary_residence_value = st.number_input(
             "Primary Residence Market Value (for property tax estimates)",
             min_value=0.0,
-            value=0.0,
+            value=float(st.session_state.get("profile_primary_residence_value", 0.0)),
             step=5000.0,
+            key="profile_primary_residence_value",
         )
-        other_assets = st.number_input("Other Assets", min_value=0.0, value=0.0, step=1000.0)
+        other_assets = st.number_input(
+            "Other Assets",
+            min_value=0.0,
+            value=float(st.session_state.get("profile_other_assets", 0.0)),
+            step=1000.0,
+            key="profile_other_assets",
+        )
 
         st.subheader("Debts")
-        mortgage_debt = st.number_input("Mortgage Debt", min_value=0.0, value=0.0, step=5000.0)
-        student_debt = st.number_input("Student Loans", min_value=0.0, value=0.0, step=1000.0)
-        credit_card_debt = st.number_input("Credit Card Debt", min_value=0.0, value=0.0, step=500.0)
-        other_debt = st.number_input("Other Debts", min_value=0.0, value=0.0, step=500.0)
+        mortgage_debt = st.number_input(
+            "Mortgage Debt",
+            min_value=0.0,
+            value=float(st.session_state.get("profile_mortgage_debt", 0.0)),
+            step=5000.0,
+            key="profile_mortgage_debt",
+        )
+        student_debt = st.number_input(
+            "Student Loans",
+            min_value=0.0,
+            value=float(st.session_state.get("profile_student_debt", 0.0)),
+            step=1000.0,
+            key="profile_student_debt",
+        )
+        credit_card_debt = st.number_input(
+            "Credit Card Debt",
+            min_value=0.0,
+            value=float(st.session_state.get("profile_credit_card_debt", 0.0)),
+            step=500.0,
+            key="profile_credit_card_debt",
+        )
+        other_debt = st.number_input(
+            "Other Debts",
+            min_value=0.0,
+            value=float(st.session_state.get("profile_other_debt", 0.0)),
+            step=500.0,
+            key="profile_other_debt",
+        )
 
         st.subheader("Recurring Monthly Costs")
-        monthly_essential = st.number_input("Essentials (housing, utilities, food)", min_value=0.0, value=0.0, step=100.0)
-        monthly_discretionary = st.number_input("Discretionary spending", min_value=0.0, value=0.0, step=100.0)
-        monthly_insurance = st.number_input("Insurance premiums", min_value=0.0, value=0.0, step=50.0)
-        monthly_other = st.number_input("Other monthly obligations", min_value=0.0, value=0.0, step=50.0)
+        monthly_essential = st.number_input(
+            "Essentials (housing, utilities, food)",
+            min_value=0.0,
+            value=float(st.session_state.get("profile_monthly_essential", 0.0)),
+            step=100.0,
+            key="profile_monthly_essential",
+        )
+        monthly_discretionary = st.number_input(
+            "Discretionary spending",
+            min_value=0.0,
+            value=float(st.session_state.get("profile_monthly_discretionary", 0.0)),
+            step=100.0,
+            key="profile_monthly_discretionary",
+        )
+        monthly_insurance = st.number_input(
+            "Insurance premiums",
+            min_value=0.0,
+            value=float(st.session_state.get("profile_monthly_insurance", 0.0)),
+            step=50.0,
+            key="profile_monthly_insurance",
+        )
+        monthly_other = st.number_input(
+            "Other monthly obligations",
+            min_value=0.0,
+            value=float(st.session_state.get("profile_monthly_other", 0.0)),
+            step=50.0,
+            key="profile_monthly_other",
+        )
 
-        dependents = st.number_input("Dependents", min_value=0, max_value=10, value=0, step=1)
+        dependents = st.number_input(
+            "Dependents",
+            min_value=0,
+            max_value=10,
+            value=int(st.session_state.get("profile_dependents", 0)),
+            step=1,
+            key="profile_dependents",
+        )
         estate_documents = st.text_area(
             "Existing wills/trusts (include states where active)",
-            value="",
+            value=st.session_state.get("profile_estate_documents", ""),
+            key="profile_estate_documents",
         )
+
         st.subheader("Risk & Savings Goals")
-        planning_mode = st.radio("Plan preference", ["Risk profile", "Custom savings target"], index=0)
+        planning_mode_value = st.session_state.get("profile_planning_mode", planning_mode_options[0])
+        planning_mode_index = (
+            planning_mode_options.index(planning_mode_value)
+            if planning_mode_value in planning_mode_options
+            else 0
+        )
+        planning_mode = st.radio(
+            "Plan preference",
+            planning_mode_options,
+            index=planning_mode_index,
+            key="profile_planning_mode",
+        )
+
         target_savings_amount: Optional[float] = None
         target_savings_rate: Optional[float] = None
+
         if planning_mode == "Risk profile":
+            risk_value = st.session_state.get("profile_risk_appetite", "Moderate")
+            risk_index = risk_options.index(risk_value) if risk_value in risk_options else 1
             risk_appetite = st.selectbox(
                 "Risk Appetite",
-                ["Conservative", "Moderate", "Aggressive"],
-                index=1,
+                risk_options,
+                index=risk_index,
+                key="profile_risk_appetite",
                 help="Select an overall portfolio risk style for allocation guidance.",
             )
         else:
+            st.session_state["profile_risk_appetite"] = "Custom target"
             risk_appetite = "Custom target"
+            target_type_value = st.session_state.get("profile_target_type", target_type_options[0])
+            target_type_index = (
+                target_type_options.index(target_type_value)
+                if target_type_value in target_type_options
+                else 0
+            )
             target_type = st.radio(
                 "Target type",
-                ["Monthly savings amount", "Percentage of income"],
+                target_type_options,
+                index=target_type_index,
+                key="profile_target_type",
                 help="Choose whether to specify a dollar goal or income percentage for savings.",
             )
             if target_type == "Monthly savings amount":
                 target_savings_amount = st.number_input(
                     "Monthly savings target (USD)",
                     min_value=0.0,
-                    value=0.0,
+                    value=float(st.session_state.get("profile_target_savings_amount", 0.0)),
                     step=100.0,
+                    key="profile_target_savings_amount",
                 )
                 target_savings_rate = None
             else:
@@ -681,14 +941,17 @@ def collect_user_inputs() -> FinancialProfile:
                     "Savings target (% of gross income)",
                     min_value=0.0,
                     max_value=100.0,
-                    value=10.0,
+                    value=float(st.session_state.get("profile_target_savings_rate", 10.0)),
                     step=1.0,
+                    key="profile_target_savings_rate",
                 )
                 target_savings_amount = None
 
         st.subheader("Additional instructions for the LLM")
         llm_notes = st.text_area(
             "Optional context",
+            value=st.session_state.get("profile_llm_notes", ""),
+            key="profile_llm_notes",
             help=(
                 "Share any qualitative information, links to custom research, or prompts the model should"
                 " consider when aggregating external datasets."
@@ -706,7 +969,7 @@ def collect_user_inputs() -> FinancialProfile:
         target_savings_rate = None
 
     return FinancialProfile(
-        age=age,
+        age=int(age),
         profession=profession,
         income=float(income),
         address=address,
@@ -846,6 +1109,7 @@ def main() -> None:
         "Provide your financial profile to generate dynamic budgeting guidance, retirement projections, and contingency planning."
     )
 
+    ensure_profile_state_defaults()
     render_sidebar()
     settings = render_llm_settings()
     profile = collect_user_inputs()
