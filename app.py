@@ -215,8 +215,10 @@ def coerce_message_content(message: Dict[str, Any]) -> str:
         for part in content:
             if isinstance(part, str):
                 pieces.append(part)
-            elif isinstance(part, dict) and part.get("type") == "text":
-                pieces.append(part.get("text", ""))
+            elif isinstance(part, dict):
+                text_value = part.get("text") or part.get("content") or part.get("value")
+                if isinstance(text_value, str):
+                    pieces.append(text_value)
         return "".join(pieces)
 
     return ""
@@ -250,6 +252,63 @@ def extract_response_text(raw: Dict[str, Any]) -> str:
             return value
 
     return ""
+
+
+def extract_reasoning_trace(raw: Dict[str, Any]) -> str:
+    """Collect any reasoning/thinking content returned by the provider."""
+
+    def _normalize(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts: List[str] = []
+            for item in value:
+                normalized = _normalize(item)
+                if normalized:
+                    parts.append(normalized)
+            return "\n".join(parts)
+        if isinstance(value, dict):
+            candidates = []
+            for key in ("text", "content", "reasoning", "thought", "value"):
+                if key in value:
+                    normalized = _normalize(value[key])
+                    if normalized:
+                        candidates.append(normalized)
+            return "\n".join(candidates)
+        return ""
+
+    traces: List[str] = []
+
+    choices = raw.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            message = choice.get("message", {}) if isinstance(choice, dict) else {}
+            for key in ("reasoning", "reasoning_content", "thoughts", "thinking"):
+                if key in message:
+                    normalized = _normalize(message[key])
+                    if normalized:
+                        traces.append(normalized)
+            if "metadata" in choice and isinstance(choice["metadata"], dict):
+                metadata_reasoning = _normalize(choice["metadata"].get("reasoning"))
+                if metadata_reasoning:
+                    traces.append(metadata_reasoning)
+
+    message = raw.get("message")
+    if isinstance(message, dict):
+        for key in ("reasoning", "reasoning_content", "thoughts", "thinking"):
+            if key in message:
+                normalized = _normalize(message[key])
+                if normalized:
+                    traces.append(normalized)
+
+    for key in ("reasoning", "analysis", "thinking"):
+        if key in raw:
+            normalized = _normalize(raw[key])
+            if normalized:
+                traces.append(normalized)
+
+    combined = "\n\n".join(trace.strip() for trace in traces if trace and trace.strip())
+    return combined.strip()
 
 
 def parse_advisor_response(raw: Dict[str, Any]) -> AdvisorResponse:
@@ -417,13 +476,34 @@ def render_sidebar() -> None:
 
 def render_llm_settings() -> LLMSettings:
     st.sidebar.subheader("LLM connection")
+
+    defaults = {
+        "llm_base_url": "",
+        "llm_model": "",
+        "llm_api_key": "",
+        "llm_temperature": 0.2,
+        "llm_max_tokens": 2048,
+        "show_load_settings": False,
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
+
     base_url = st.sidebar.text_input(
         "Base URL",
+        value=st.session_state.get("llm_base_url", ""),
+        key="llm_base_url",
         help="Root URL for an OpenAI-compatible API (for example a vLLM or Ollama server).",
     )
-    model = st.sidebar.text_input("Model name", help="Identifier exposed by the selected endpoint.")
+    model = st.sidebar.text_input(
+        "Model name",
+        value=st.session_state.get("llm_model", ""),
+        key="llm_model",
+        help="Identifier exposed by the selected endpoint.",
+    )
     api_key = st.sidebar.text_input(
         "API key",
+        value=st.session_state.get("llm_api_key", ""),
+        key="llm_api_key",
         type="password",
         help="Optional token if the endpoint requires authentication.",
     )
@@ -432,7 +512,8 @@ def render_llm_settings() -> LLMSettings:
         "Temperature",
         min_value=0.0,
         max_value=1.0,
-        value=0.2,
+        value=st.session_state.get("llm_temperature", 0.2),
+        key="llm_temperature",
         step=0.05,
         help="Lower values keep outputs closer to sourced data.",
     )
@@ -441,17 +522,69 @@ def render_llm_settings() -> LLMSettings:
             "Max tokens",
             min_value=256,
             max_value=8192,
-            value=2048,
+            value=int(st.session_state.get("llm_max_tokens", 2048)),
+            key="llm_max_tokens",
             step=256,
             help="Upper bound for response length.",
         )
     )
 
-    client = None
-    if base_url and model:
-        client = LLMClient(base_url=base_url, model=model, api_key=api_key or None)
+    actions_col1, actions_col2 = st.sidebar.columns(2)
+    with actions_col1:
+        if st.button("Load Settings"):
+            st.session_state["show_load_settings"] = True
 
-    return LLMSettings(client=client, model=model or None, temperature=temperature, max_tokens=max_tokens)
+    if st.session_state.get("show_load_settings"):
+        uploaded = st.sidebar.file_uploader(
+            "Select settings JSON",
+            type="json",
+            key="settings_loader",
+            help="Upload a JSON file previously exported with Save Settings.",
+        )
+        if uploaded is not None:
+            try:
+                loaded = json.loads(uploaded.getvalue().decode("utf-8"))
+                st.session_state["llm_base_url"] = loaded.get("base_url", st.session_state["llm_base_url"])
+                st.session_state["llm_model"] = loaded.get("model", st.session_state["llm_model"])
+                st.session_state["llm_api_key"] = loaded.get("api_key", st.session_state["llm_api_key"])
+                st.session_state["llm_temperature"] = float(loaded.get("temperature", st.session_state["llm_temperature"]))
+                st.session_state["llm_max_tokens"] = int(loaded.get("max_tokens", st.session_state["llm_max_tokens"]))
+                st.sidebar.success("Settings loaded.")
+                st.session_state["show_load_settings"] = False
+                st.experimental_rerun()
+            except Exception as exc:  # pragma: no cover - surface load errors to UI
+                st.sidebar.error(f"Failed to load settings: {exc}")
+
+    current_settings = {
+        "base_url": st.session_state.get("llm_base_url", ""),
+        "model": st.session_state.get("llm_model", ""),
+        "api_key": st.session_state.get("llm_api_key", ""),
+        "temperature": float(st.session_state.get("llm_temperature", 0.2)),
+        "max_tokens": int(st.session_state.get("llm_max_tokens", 2048)),
+    }
+
+    with actions_col2:
+        st.download_button(
+            "Save Settings",
+            data=json.dumps(current_settings, indent=2),
+            file_name="advisor_llm_settings.json",
+            mime="application/json",
+        )
+
+    client = None
+    if current_settings["base_url"] and current_settings["model"]:
+        client = LLMClient(
+            base_url=current_settings["base_url"],
+            model=current_settings["model"],
+            api_key=current_settings["api_key"] or None,
+        )
+
+    return LLMSettings(
+        client=client,
+        model=current_settings["model"] or None,
+        temperature=current_settings["temperature"],
+        max_tokens=current_settings["max_tokens"],
+    )
 
 
 def collect_user_inputs() -> FinancialProfile:
@@ -653,12 +786,17 @@ def main() -> None:
 
     raw_response: Optional[Dict[str, Any]] = None
     advisor_response: Optional[AdvisorResponse] = None
+    reasoning_trace = ""
     try:
         with st.spinner("Requesting plan from LLM..."):
             raw_response = settings.client.generate_plan(payload)
+        reasoning_trace = extract_reasoning_trace(raw_response) if raw_response else ""
         advisor_response = parse_advisor_response(raw_response)
     except Exception as exc:  # pragma: no cover - surface error to UI
         st.error(f"Failed to generate plan: {exc}")
+        if reasoning_trace:
+            with st.expander("Model reasoning"):
+                st.write(reasoning_trace)
         if raw_response is not None:
             with st.expander("Raw LLM response"):
                 serialized = json.dumps(raw_response, indent=2)
@@ -676,6 +814,21 @@ def main() -> None:
         st.error("The LLM did not return any recommendations. Please try again.")
         st.stop()
         return
+
+    if reasoning_trace:
+        with st.expander("Model reasoning", expanded=False):
+            st.write(reasoning_trace)
+
+    if raw_response is not None:
+        with st.expander("Raw LLM response", expanded=False):
+            serialized = json.dumps(raw_response, indent=2)
+            st.code(serialized)
+            st.download_button(
+                "Download raw response",
+                data=serialized,
+                file_name="advisor_raw_response.json",
+                mime="application/json",
+            )
 
     render_budget_section(advisor_response.budget)
     render_retirement_section(advisor_response.retirement_projection)
