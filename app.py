@@ -222,9 +222,38 @@ def coerce_message_content(message: Dict[str, Any]) -> str:
     return ""
 
 
+def extract_response_text(raw: Dict[str, Any]) -> str:
+    """Return the assistant text regardless of provider response schema."""
+
+    choices = raw.get("choices")
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message", {})
+        content = coerce_message_content(message)
+        if content:
+            return content
+
+    message = raw.get("message")
+    if isinstance(message, dict):
+        content = coerce_message_content(message)
+        if content:
+            return content
+
+    response_text = raw.get("response")
+    if isinstance(response_text, str):
+        return response_text
+
+    # Some providers surface the text at the top level under keys like
+    # "content", "text", or "output".
+    for key in ("content", "text", "output"):
+        value = raw.get(key)
+        if isinstance(value, str):
+            return value
+
+    return ""
+
+
 def parse_advisor_response(raw: Dict[str, Any]) -> AdvisorResponse:
-    message = raw.get("choices", [{}])[0].get("message", {})
-    content = coerce_message_content(message)
+    content = extract_response_text(raw)
     parsed = extract_first_json_block(content)
     if not parsed:
         preview = content.strip()
@@ -632,7 +661,14 @@ def main() -> None:
         st.error(f"Failed to generate plan: {exc}")
         if raw_response is not None:
             with st.expander("Raw LLM response"):
-                st.code(json.dumps(raw_response, indent=2))
+                serialized = json.dumps(raw_response, indent=2)
+                st.code(serialized)
+                st.download_button(
+                    "Download raw response",
+                    data=serialized,
+                    file_name="advisor_raw_response.json",
+                    mime="application/json",
+                )
         st.stop()
         return
 
