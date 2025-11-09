@@ -20,6 +20,7 @@ class FinancialProfile:
     liquid_assets: float
     investment_assets: float
     real_estate_assets: float
+    primary_residence_value: float
     other_assets: float
     mortgage_debt: float
     student_debt: float
@@ -32,6 +33,8 @@ class FinancialProfile:
     dependents: int
     estate_documents: str
     risk_appetite: str
+    target_savings_amount: Optional[float] = None
+    target_savings_rate: Optional[float] = None
     llm_notes: str = ""
 
     @property
@@ -370,7 +373,9 @@ SYSTEM_PROMPT = """
 You are a fiduciary financial analyst tasked with building a personalized savings and
 investment plan. Combine the provided household profile with current data from the Bureau
 of Labor Statistics (BLS), O*NET, regional cost-of-living indices, and relevant policy or
-macroeconomic news. Never fabricate figures; cite every quantitative statement with its
+macroeconomic news. Incorporate current federal, state, and local income tax brackets,
+along with property tax expectations tied to the household's location and stated real
+estate values. Never fabricate figures; cite every quantitative statement with its
 source. Respond in JSON with the structure:
 {
   "budget": [
@@ -385,8 +390,8 @@ source. Respond in JSON with the structure:
   "narrative": str,
   "sources": [str]
 }
-Ensure that the calculations reference the cited datasets and that all currency values are
-expressed in USD.
+Ensure that the calculations reference the cited datasets, reflect after-tax cash flow,
+and that all currency values are expressed in USD.
 """
 
 
@@ -401,6 +406,7 @@ def build_user_message(profile: FinancialProfile) -> str:
             "liquid": profile.liquid_assets,
             "investment": profile.investment_assets,
             "real_estate": profile.real_estate_assets,
+            "primary_residence_value": profile.primary_residence_value,
             "other": profile.other_assets,
         },
         "debts": {
@@ -418,6 +424,13 @@ def build_user_message(profile: FinancialProfile) -> str:
         "dependents": profile.dependents,
         "estate_documents": profile.estate_documents,
         "risk_appetite": profile.risk_appetite,
+        "goals": {
+            "planning_mode": "custom_target"
+            if profile.risk_appetite.lower() == "custom target"
+            else "risk_profile",
+            "target_monthly_savings": profile.target_savings_amount,
+            "target_savings_rate": profile.target_savings_rate,
+        },
         "net_worth": profile.net_worth,
         "monthly_income": profile.monthly_income,
         "recurring_costs": profile.recurring_costs,
@@ -429,7 +442,8 @@ def build_user_message(profile: FinancialProfile) -> str:
             "Quantify job outlook, wage trends, and employment volatility using BLS and O*NET data.",
             "Adjust cost projections by the household's location using a reputable cost-of-living index.",
             "Account for current economic indicators (inflation, interest rates, policy changes).",
-            "Provide recommended monthly budget allocations that match the user's risk appetite.",
+            "Estimate federal, state, and local income taxes plus property taxes using current rates relevant to the provided address and income; show the sources.",
+            "Provide recommended monthly budget allocations that align with the stated risk appetite or meet any custom savings target.",
             "Project retirement balances with explicit assumptions about contribution amounts and returns.",
             "Size emergency and catastrophic reserves for layoffs, medical events, and dependent support.",
             "Reference every figure with a verifiable source URL or citation identifier.",
@@ -439,6 +453,8 @@ def build_user_message(profile: FinancialProfile) -> str:
             "currency": "USD",
             "explain_methodology": True,
             "include_sources": True,
+            "show_after_tax_budget": True,
+            "detail_tax_references": True,
         },
     }
 
@@ -482,7 +498,7 @@ def render_llm_settings() -> LLMSettings:
         "llm_model": "",
         "llm_api_key": "",
         "llm_temperature": 0.2,
-        "llm_max_tokens": 2048,
+        "llm_max_tokens": 4096,
         "show_load_settings": False,
     }
     for key, value in defaults.items():
@@ -522,7 +538,7 @@ def render_llm_settings() -> LLMSettings:
             "Max tokens",
             min_value=256,
             max_value=8192,
-            value=int(st.session_state.get("llm_max_tokens", 2048)),
+            value=int(st.session_state.get("llm_max_tokens", 4096)),
             key="llm_max_tokens",
             step=256,
             help="Upper bound for response length.",
@@ -560,7 +576,7 @@ def render_llm_settings() -> LLMSettings:
         "model": st.session_state.get("llm_model", ""),
         "api_key": st.session_state.get("llm_api_key", ""),
         "temperature": float(st.session_state.get("llm_temperature", 0.2)),
-        "max_tokens": int(st.session_state.get("llm_max_tokens", 2048)),
+        "max_tokens": int(st.session_state.get("llm_max_tokens", 4096)),
     }
 
     with actions_col2:
@@ -609,6 +625,12 @@ def collect_user_inputs() -> FinancialProfile:
         real_estate_assets = st.number_input(
             "Real Estate Equity", min_value=0.0, value=0.0, step=5000.0
         )
+        primary_residence_value = st.number_input(
+            "Primary Residence Market Value (for property tax estimates)",
+            min_value=0.0,
+            value=0.0,
+            step=5000.0,
+        )
         other_assets = st.number_input("Other Assets", min_value=0.0, value=0.0, step=1000.0)
 
         st.subheader("Debts")
@@ -628,7 +650,41 @@ def collect_user_inputs() -> FinancialProfile:
             "Existing wills/trusts (include states where active)",
             value="",
         )
-        risk_appetite = st.selectbox("Risk Appetite", ["Careful", "Moderate", "Aggressive"], index=1)
+        st.subheader("Risk & Savings Goals")
+        planning_mode = st.radio("Plan preference", ["Risk profile", "Custom savings target"], index=0)
+        target_savings_amount: Optional[float] = None
+        target_savings_rate: Optional[float] = None
+        if planning_mode == "Risk profile":
+            risk_appetite = st.selectbox(
+                "Risk Appetite",
+                ["Conservative", "Moderate", "Aggressive"],
+                index=1,
+                help="Select an overall portfolio risk style for allocation guidance.",
+            )
+        else:
+            risk_appetite = "Custom target"
+            target_type = st.radio(
+                "Target type",
+                ["Monthly savings amount", "Percentage of income"],
+                help="Choose whether to specify a dollar goal or income percentage for savings.",
+            )
+            if target_type == "Monthly savings amount":
+                target_savings_amount = st.number_input(
+                    "Monthly savings target (USD)",
+                    min_value=0.0,
+                    value=0.0,
+                    step=100.0,
+                )
+                target_savings_rate = None
+            else:
+                target_savings_rate = st.number_input(
+                    "Savings target (% of gross income)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=10.0,
+                    step=1.0,
+                )
+                target_savings_amount = None
 
         st.subheader("Additional instructions for the LLM")
         llm_notes = st.text_area(
@@ -644,6 +700,11 @@ def collect_user_inputs() -> FinancialProfile:
     if not submitted:
         st.stop()
 
+    if target_savings_amount is not None and target_savings_amount <= 0:
+        target_savings_amount = None
+    if target_savings_rate is not None and target_savings_rate <= 0:
+        target_savings_rate = None
+
     return FinancialProfile(
         age=age,
         profession=profession,
@@ -653,6 +714,7 @@ def collect_user_inputs() -> FinancialProfile:
         liquid_assets=float(liquid_assets),
         investment_assets=float(investment_assets),
         real_estate_assets=float(real_estate_assets),
+        primary_residence_value=float(primary_residence_value),
         other_assets=float(other_assets),
         mortgage_debt=float(mortgage_debt),
         student_debt=float(student_debt),
@@ -665,6 +727,8 @@ def collect_user_inputs() -> FinancialProfile:
         dependents=int(dependents),
         estate_documents=estate_documents,
         risk_appetite=risk_appetite,
+        target_savings_amount=target_savings_amount,
+        target_savings_rate=target_savings_rate,
         llm_notes=llm_notes,
     )
 
@@ -682,6 +746,25 @@ def render_summary(profile: FinancialProfile) -> None:
 
     if profile.estate_documents:
         st.caption(f"Estate planning documents noted: {profile.estate_documents}")
+
+    if profile.risk_appetite:
+        if profile.risk_appetite.lower() == "custom target":
+            st.caption("Planning preference: Custom savings target")
+        else:
+            st.caption(f"Risk appetite selected: {profile.risk_appetite}")
+
+    if profile.primary_residence_value:
+        st.caption(
+            f"Primary residence market value reported: ${profile.primary_residence_value:,.0f}"
+        )
+
+    if profile.target_savings_amount or profile.target_savings_rate:
+        goal_parts = []
+        if profile.target_savings_amount:
+            goal_parts.append(f"${profile.target_savings_amount:,.0f} per month")
+        if profile.target_savings_rate:
+            goal_parts.append(f"{profile.target_savings_rate:.1f}% of income")
+        st.caption("Savings goal preference: " + " and ".join(goal_parts))
 
 
 def render_budget_section(items: List[AdvisorBudgetItem]) -> None:
