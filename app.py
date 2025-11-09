@@ -182,6 +182,8 @@ PROFILE_IMPORT_MAP: Dict[str, str] = {
     external: internal for internal, external in PROFILE_EXPORT_MAP.items()
 }
 
+LLM_REQUEST_TIMEOUT = 300
+PDF_LINES_PER_PAGE = 45
 
 def trigger_streamlit_rerun() -> None:
     rerun: Optional[Callable[[], None]] = getattr(st, "rerun", None)
@@ -214,12 +216,6 @@ def export_profile_settings() -> Dict[str, Any]:
             session_key, PROFILE_SESSION_DEFAULTS[session_key]
         )
     return snapshot
-
-
-LLM_REQUEST_TIMEOUT = 300
-
-PDF_LINES_PER_PAGE = 45
-
 
 class LLMClient:
     """Minimal client for OpenAI-compatible chat endpoints (vLLM, Ollama, etc.)."""
