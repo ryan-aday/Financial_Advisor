@@ -542,6 +542,7 @@ def main() -> None:
     if not settings.client or not settings.model:
         st.error("Provide the LLM base URL and model name in the sidebar to generate recommendations.")
         st.stop()
+        return
 
     payload = build_llm_payload(
         profile=profile,
@@ -555,6 +556,7 @@ def main() -> None:
         st.code(json.dumps(preview, indent=2))
 
     raw_response: Optional[Dict[str, Any]] = None
+    advisor_response: Optional[AdvisorResponse] = None
     try:
         with st.spinner("Requesting plan from LLM..."):
             raw_response = settings.client.generate_plan(payload)
@@ -565,6 +567,12 @@ def main() -> None:
             with st.expander("Raw LLM response"):
                 st.code(json.dumps(raw_response, indent=2))
         st.stop()
+        return
+
+    if advisor_response is None:
+        st.error("The LLM did not return any recommendations. Please try again.")
+        st.stop()
+        return
 
     render_budget_section(advisor_response.budget)
     render_retirement_section(advisor_response.retirement_projection)
