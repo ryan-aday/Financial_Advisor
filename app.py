@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import ast
 import json
+import re
+import textwrap
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 import requests
 import streamlit as st
-
-import textwrap
 
 
 # --- Data models -----------------------------------------------------------
@@ -182,8 +183,6 @@ PROFILE_IMPORT_MAP: Dict[str, str] = {
     external: internal for internal, external in PROFILE_EXPORT_MAP.items()
 }
 
-LLM_REQUEST_TIMEOUT = 300
-PDF_LINES_PER_PAGE = 45
 
 def trigger_streamlit_rerun() -> None:
     rerun: Optional[Callable[[], None]] = getattr(st, "rerun", None)
@@ -216,6 +215,12 @@ def export_profile_settings() -> Dict[str, Any]:
             session_key, PROFILE_SESSION_DEFAULTS[session_key]
         )
     return snapshot
+
+
+LLM_REQUEST_TIMEOUT = 300
+
+PDF_LINES_PER_PAGE = 45
+
 
 class LLMClient:
     """Minimal client for OpenAI-compatible chat endpoints (vLLM, Ollama, etc.)."""
@@ -442,8 +447,14 @@ def build_pdf_report(
         ("Other assets", format_currency(profile.other_assets)),
         ("Total debt", format_currency(profile.total_debt)),
         ("Net worth", format_currency(profile.net_worth)),
-        ("Monthly take-home estimate", format_currency(profile.monthly_income)),
-        ("Monthly recurring costs", format_currency(profile.recurring_costs)),
+        (
+            "Monthly take-home estimate",
+            format_currency(profile.monthly_income),
+        ),
+        (
+            "Monthly recurring costs",
+            format_currency(profile.recurring_costs),
+        ),
     ]
 
     for label, value in profile_rows:
@@ -535,6 +546,46 @@ def build_pdf_report(
     return build_pdf_document(lines)
 
 
+def _clean_json_candidate(candidate: str) -> str:
+    cleaned = candidate.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned[3:]
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+        if "```" in cleaned:
+            cleaned = cleaned.split("```", 1)[0]
+    smart_quotes = {
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2018": "'",
+        "\u2019": "'",
+    }
+    for bad, good in smart_quotes.items():
+        cleaned = cleaned.replace(bad, good)
+    cleaned = re.sub(r",\s*(?=[}\]])", "", cleaned)
+    return cleaned
+
+
+def _try_parse_json(candidate: str) -> Optional[Dict[str, Any]]:
+    cleaned = _clean_json_candidate(candidate)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    prefix_guard = r"(?<![A-Za-z0-9_\"'])"
+    python_friendly = re.sub(prefix_guard + r"true\b", "True", cleaned)
+    python_friendly = re.sub(prefix_guard + r"false\b", "False", python_friendly)
+    python_friendly = re.sub(prefix_guard + r"null\b", "None", python_friendly)
+    try:
+        parsed = ast.literal_eval(python_friendly)
+    except Exception:
+        return None
+    if isinstance(parsed, (dict, list)):
+        return parsed  # type: ignore[return-value]
+    return None
+
+
 def extract_first_json_block(text: str) -> Optional[Dict[str, Any]]:
     """Locate the first balanced JSON object/array in the text."""
 
@@ -581,14 +632,14 @@ def extract_first_json_block(text: str) -> Optional[Dict[str, Any]]:
             stack.pop()
             if not stack and start_idx is not None:
                 candidate = text[start_idx : idx + 1]
-                try:
-                    return json.loads(candidate)
-                except json.JSONDecodeError:
-                    # Continue searching for the next balanced candidate
-                    start_idx = None
-                    in_string = False
-                    escape = False
-                    continue
+                parsed_candidate = _try_parse_json(candidate)
+                if parsed_candidate is not None:
+                    return parsed_candidate
+                # Continue searching for the next balanced candidate
+                start_idx = None
+                in_string = False
+                escape = False
+                continue
 
     return None
 
@@ -1308,8 +1359,12 @@ def render_summary(profile: FinancialProfile) -> None:
     col2.metric("Total Debt", f"${profile.total_debt:,.0f}")
     col3.metric("Net Worth", f"${profile.net_worth:,.0f}")
 
-    st.markdown((f"Monthly take-home estimate: ${profile.monthly_income:,.0f}"))
-    st.markdown((f"Recurring costs: ${profile.recurring_costs:,.0f}"))
+    st.markdown(
+        (
+            f"**Monthly take-home estimate:** ${profile.monthly_income:,.0f}  "
+            f"•  **Recurring costs:** ${profile.recurring_costs:,.0f}"
+        )
+    )
 
     if profile.estate_documents:
         st.caption(f"Estate planning documents noted: {profile.estate_documents}")
