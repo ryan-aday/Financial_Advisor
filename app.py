@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from io import BytesIO
+from typing import Any, Dict, List, Optional, Callable
 
 import pandas as pd
 import requests
 import streamlit as st
+
+import textwrap
 
 
 # --- Data models -----------------------------------------------------------
@@ -179,6 +182,22 @@ PROFILE_IMPORT_MAP: Dict[str, str] = {
     external: internal for internal, external in PROFILE_EXPORT_MAP.items()
 }
 
+LLM_REQUEST_TIMEOUT = 300
+PDF_LINES_PER_PAGE = 45
+
+def trigger_streamlit_rerun() -> None:
+    rerun: Optional[Callable[[], None]] = getattr(st, "rerun", None)
+    if callable(rerun):
+        rerun()
+        return
+
+    experimental: Optional[Callable[[], None]] = getattr(st, "experimental_rerun", None)
+    if callable(experimental):
+        experimental()
+        return
+
+    raise RuntimeError("Streamlit rerun support is unavailable in this environment.")
+
 
 def ensure_profile_state_defaults() -> None:
     pending_profile = st.session_state.pop("pending_profile_settings", None)
@@ -198,7 +217,6 @@ def export_profile_settings() -> Dict[str, Any]:
         )
     return snapshot
 
-
 class LLMClient:
     """Minimal client for OpenAI-compatible chat endpoints (vLLM, Ollama, etc.)."""
 
@@ -213,7 +231,12 @@ class LLMClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         endpoint = f"{self.base_url}/v1/chat/completions"
-        response = requests.post(endpoint, headers=headers, data=json.dumps(payload), timeout=120)
+        response = requests.post(
+            endpoint,
+            headers=headers,
+            data=json.dumps(payload),
+            timeout=LLM_REQUEST_TIMEOUT,
+        )
         response.raise_for_status()
         return response.json()
 
@@ -230,6 +253,292 @@ def sanitize_number(value: Any) -> float:
         except ValueError:
             return 0.0
     return 0.0
+
+
+def wrap_text(text: str, width: int = 90, indent: str = "") -> List[str]:
+    """Wrap text to a specified width while preserving simple indentation."""
+
+    wrapper = textwrap.TextWrapper(
+        width=max(width, len(indent) + 1),
+        initial_indent=indent,
+        subsequent_indent=indent,
+        replace_whitespace=False,
+        drop_whitespace=False,
+    )
+
+    lines: List[str] = []
+    for block in text.splitlines():
+        if not block:
+            lines.append(indent.rstrip() if indent else "")
+            continue
+        lines.extend(wrapper.wrap(block))
+
+    return lines or [indent.rstrip() if indent else ""]
+
+
+def normalize_markdown_line(line: str) -> str:
+    """Convert light Markdown into plain text for PDF rendering."""
+
+    replacements = {"**": "", "__": "", "`": ""}
+    normalized = line
+    for src, target in replacements.items():
+        normalized = normalized.replace(src, target)
+
+    stripped = normalized.lstrip()
+    leading_spaces = len(normalized) - len(stripped)
+
+    if stripped.startswith(('# ', '## ', '### ')):
+        stripped = stripped.lstrip('# ').strip()
+        return (" " * leading_spaces) + stripped
+
+    if stripped.startswith(('- ', '* ')):
+        content = stripped[2:]
+        return (" " * leading_spaces) + f"- {content}"
+
+    if stripped.startswith('> '):
+        content = stripped[2:]
+        return (" " * leading_spaces) + f"Quote: {content}"
+
+    return normalized
+
+
+def sanitize_pdf_line(line: str) -> str:
+    """Escape characters that are not safe in a PDF text run."""
+
+    safe = line.replace("\r", "")
+    safe = safe.encode("ascii", "replace").decode("ascii")
+    safe = safe.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    return safe if safe.strip() else " "
+
+
+def build_pdf_document(lines: List[str]) -> bytes:
+    """Create a simple multi-page PDF from a list of text lines."""
+
+    sanitized_lines = [sanitize_pdf_line(line) for line in lines]
+    if not sanitized_lines:
+        sanitized_lines = [" "]
+
+    pages: List[List[str]] = []
+    current: List[str] = []
+    for line in sanitized_lines:
+        if len(current) >= PDF_LINES_PER_PAGE:
+            pages.append(current)
+            current = []
+        current.append(line)
+    if current:
+        pages.append(current)
+
+    if not pages:
+        pages = [[" "]]
+
+    num_pages = len(pages)
+    font_obj_num = 3 + 2 * num_pages
+    kids_refs = " ".join(f"{3 + 2 * idx} 0 R" for idx in range(num_pages))
+
+    objects: List[str] = []
+    objects.append("1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n")
+    objects.append(
+        f"2 0 obj << /Type /Pages /Kids [{kids_refs}] /Count {num_pages} >> endobj\n"
+    )
+
+    for idx, page_lines in enumerate(pages):
+        page_obj_num = 3 + 2 * idx
+        content_obj_num = 4 + 2 * idx
+
+        content_parts = [
+            "BT",
+            "/F1 12 Tf",
+            "14 TL",
+            "1 0 0 1 50 760 Tm",
+        ]
+        for line_idx, line in enumerate(page_lines):
+            if line_idx > 0:
+                content_parts.append("T*")
+            content_parts.append(f"({line}) Tj")
+        content_parts.append("ET")
+
+        content_stream = "\n".join(content_parts)
+        content_bytes = content_stream.encode("latin-1")
+
+        objects.append(
+            f"{page_obj_num} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {content_obj_num} 0 R /Resources << /Font << /F1 {font_obj_num} 0 R >> >> >> endobj\n"
+        )
+        objects.append(
+            f"{content_obj_num} 0 obj << /Length {len(content_bytes)} >> stream\n{content_stream}\nendstream\nendobj\n"
+        )
+
+    objects.append(
+        f"{font_obj_num} 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n"
+    )
+
+    buffer = BytesIO()
+    buffer.write(b"%PDF-1.4\n")
+
+    offsets: List[int] = []
+    for obj in objects:
+        offsets.append(buffer.tell())
+        buffer.write(obj.encode("latin-1"))
+
+    xref_start = buffer.tell()
+    buffer.write(f"xref\n0 {len(objects) + 1}\n".encode("latin-1"))
+    buffer.write(b"0000000000 65535 f \n")
+    for offset in offsets:
+        buffer.write(f"{offset:010d} 00000 n \n".encode("latin-1"))
+
+    buffer.write(
+        f"trailer << /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF".encode(
+            "latin-1"
+        )
+    )
+    return buffer.getvalue()
+
+
+def format_currency(value: float) -> str:
+    return f"${value:,.2f}"
+
+
+def build_pdf_report(
+    profile: FinancialProfile,
+    response: AdvisorResponse,
+    model_name: Optional[str] = None,
+) -> bytes:
+    """Create a PDF report summarizing the user inputs and advisor output."""
+
+    lines: List[str] = []
+    lines.append("Personalized Investment & Savings Advisor Report")
+    if model_name:
+        lines.append(f"Model: {model_name}")
+    lines.append("")
+
+    lines.append("Client Profile")
+    profile_rows = [
+        ("Age", str(profile.age)),
+        ("Profession", profile.profession or "N/A"),
+        ("Annual income", format_currency(profile.income)),
+        ("Address", profile.address or "N/A"),
+        ("Education", profile.education or "N/A"),
+        ("Dependents", str(profile.dependents)),
+        ("Risk appetite", profile.risk_appetite or "N/A"),
+    ]
+
+    if profile.target_savings_amount:
+        profile_rows.append(
+            ("Target savings amount", format_currency(profile.target_savings_amount))
+        )
+    if profile.target_savings_rate:
+        profile_rows.append(
+            ("Target savings rate", f"{profile.target_savings_rate:.1f}% of income")
+        )
+    if profile.estate_documents:
+        profile_rows.append(("Estate documents", profile.estate_documents))
+    if profile.llm_notes:
+        profile_rows.append(("Additional notes", profile.llm_notes))
+
+    net_rows = [
+        ("Liquid assets", format_currency(profile.liquid_assets)),
+        ("Investment assets", format_currency(profile.investment_assets)),
+        ("Real estate assets", format_currency(profile.real_estate_assets)),
+        ("Primary residence value", format_currency(profile.primary_residence_value)),
+        ("Other assets", format_currency(profile.other_assets)),
+        ("Total debt", format_currency(profile.total_debt)),
+        ("Net worth", format_currency(profile.net_worth)),
+        (
+            "Monthly take-home estimate",
+            format_currency(profile.monthly_income),
+        ),
+        (
+            "Monthly recurring costs",
+            format_currency(profile.recurring_costs),
+        ),
+    ]
+
+    for label, value in profile_rows:
+        lines.extend(wrap_text(f"{label}: {value}", width=90))
+
+    lines.append("")
+    lines.append("Asset & Cash Flow Overview")
+    for label, value in net_rows:
+        lines.extend(wrap_text(f"{label}: {value}", width=90, indent="  "))
+
+    lines.append("")
+
+    if response.narrative:
+        lines.append("Narrative Summary")
+        for raw_line in response.narrative.splitlines():
+            normalized = normalize_markdown_line(raw_line)
+            lines.extend(wrap_text(normalized, width=90))
+        lines.append("")
+
+    if response.budget:
+        lines.append("Budget Recommendations")
+        for item in response.budget:
+            lines.extend(
+                wrap_text(
+                    f"- {item.category}: {format_currency(item.amount)}",
+                    width=90,
+                )
+            )
+            if item.notes:
+                for wrapped in wrap_text(
+                    f"Notes: {normalize_markdown_line(item.notes)}", width=90, indent="    "
+                ):
+                    lines.append(wrapped)
+            if item.source:
+                lines.extend(
+                    wrap_text(f"Source: {item.source}", width=90, indent="    ")
+                )
+        lines.append("")
+
+    if response.retirement_projection:
+        lines.append("Retirement Projection")
+        for point in response.retirement_projection:
+            label = (
+                f"Age {point.age:.0f} ({point.year}): {format_currency(point.balance)}"
+            )
+            lines.extend(wrap_text(label, width=90))
+            if point.assumptions:
+                lines.extend(
+                    wrap_text(
+                        f"Assumptions: {normalize_markdown_line(point.assumptions)}",
+                        width=90,
+                        indent="    ",
+                    )
+                )
+            if point.source:
+                lines.extend(
+                    wrap_text(f"Source: {point.source}", width=90, indent="    ")
+                )
+        lines.append("")
+
+    if response.catastrophic_plan:
+        lines.append("Catastrophic Preparedness")
+        for plan in response.catastrophic_plan:
+            lines.extend(
+                wrap_text(
+                    f"- {plan.scenario}: Reserve {format_currency(plan.recommended_reserve)}",
+                    width=90,
+                )
+            )
+            if plan.guidance:
+                lines.extend(
+                    wrap_text(
+                        f"Guidance: {normalize_markdown_line(plan.guidance)}",
+                        width=90,
+                        indent="    ",
+                    )
+                )
+            if plan.source:
+                lines.extend(
+                    wrap_text(f"Source: {plan.source}", width=90, indent="    ")
+                )
+        lines.append("")
+
+    if response.sources:
+        lines.append("Citations")
+        for source in response.sources:
+            lines.extend(wrap_text(f"- {source}", width=90))
+
+    return build_pdf_document(lines)
 
 
 def extract_first_json_block(text: str) -> Optional[Dict[str, Any]]:
@@ -652,7 +961,8 @@ def render_llm_settings() -> LLMSettings:
         if uploaded is not None:
             try:
                 loaded = json.loads(uploaded.getvalue().decode("utf-8"))
-                llm_blob = loaded.get("llm") if "llm" in loaded else loaded
+                llm_blob_candidate = loaded.get("llm") if "llm" in loaded else loaded
+                llm_blob = llm_blob_candidate if isinstance(llm_blob_candidate, dict) else {}
                 profile_blob = loaded.get("profile", {})
 
                 st.session_state["pending_llm_settings"] = {
@@ -683,7 +993,8 @@ def render_llm_settings() -> LLMSettings:
                     st.session_state["pending_profile_settings"] = profile_settings
                 st.session_state["show_load_settings"] = False
                 st.session_state["settings_loaded_success"] = True
-                st.experimental_rerun()
+                st.session_state.pop("settings_loader", None)
+                trigger_streamlit_rerun()
             except Exception as exc:  # pragma: no cover - surface load errors to UI
                 st.sidebar.error(f"Failed to load settings: {exc}")
 
@@ -1003,8 +1314,11 @@ def render_summary(profile: FinancialProfile) -> None:
     col2.metric("Total Debt", f"${profile.total_debt:,.0f}")
     col3.metric("Net Worth", f"${profile.net_worth:,.0f}")
 
-    st.write(
-        f"Monthly take-home estimate: **${profile.monthly_income:,.0f}** | Recurring costs: **${profile.recurring_costs:,.0f}**"
+    st.markdown(
+        (
+            f"**Monthly take-home estimate:** ${profile.monthly_income:,.0f}  "
+            f"•  **Recurring costs:** ${profile.recurring_costs:,.0f}"
+        )
     )
 
     if profile.estate_documents:
@@ -1181,6 +1495,14 @@ def main() -> None:
     render_retirement_section(advisor_response.retirement_projection)
     render_catastrophic_section(advisor_response.catastrophic_plan)
     render_narrative(advisor_response)
+
+    pdf_bytes = build_pdf_report(profile, advisor_response, settings.model)
+    st.download_button(
+        "Download advisor report (PDF)",
+        data=pdf_bytes,
+        file_name="advisor_report.pdf",
+        mime="application/pdf",
+    )
 
 
 if __name__ == "__main__":
