@@ -2,16 +2,97 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import textwrap
 import unicodedata
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 import requests
 import streamlit as st
+
+
+ENV_PATH = Path(__file__).resolve().parent / ".env"
+
+
+def load_env_file(path: Path = ENV_PATH) -> Dict[str, str]:
+    """Populate os.environ with key/value pairs from a .env file if present."""
+
+    if not path.exists():
+        return {}
+
+    loaded: Dict[str, str] = {}
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.lower().startswith("export "):
+            line = line[7:]
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if value and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        loaded[key] = value
+        os.environ.setdefault(key, value)
+
+    return loaded
+
+
+ENV_VARS = load_env_file()
+
+
+def env_default(key: str, fallback: str = "") -> str:
+    return os.environ.get(key, fallback)
+
+
+PROVIDER_PRESETS: Dict[str, Dict[str, str]] = {
+    "Groq": {
+        "base_url": env_default("GROQ_BASE_URL", "https://api.groq.com/openai"),
+        "model": env_default("GROQ_MODEL", ""),
+        "api_key": env_default("GROQ_API_KEY", ""),
+    },
+    "Ollama": {
+        "base_url": env_default("OLLAMA_BASE_URL", "http://localhost:11434"),
+        "model": env_default("OLLAMA_MODEL", "deepseek-r1:70b"),
+        "api_key": env_default("OLLAMA_API_KEY", ""),
+    },
+    "Custom": {
+        "base_url": env_default("LLM_BASE_URL", ""),
+        "model": env_default("LLM_MODEL", ""),
+        "api_key": env_default("LLM_API_KEY", ""),
+    },
+}
+
+
+DEFAULT_PROVIDER = env_default("LLM_DEFAULT_PROVIDER", "Groq")
+
+
+SESSION_PRESET_KEYS = {
+    "base_url": "llm_base_url",
+    "model": "llm_model",
+    "api_key": "llm_api_key",
+}
+
+
+def apply_provider_defaults_to_session(provider: str, overwrite: bool = False) -> None:
+    preset = PROVIDER_PRESETS.get(provider, {})
+    if not preset:
+        return
+
+    for preset_key, session_key in SESSION_PRESET_KEYS.items():
+        value = preset.get(preset_key)
+        if value or overwrite:
+            if overwrite or not st.session_state.get(session_key):
+                st.session_state[session_key] = value or ""
 
 
 # --- Data models -----------------------------------------------------------
@@ -114,6 +195,7 @@ class AdvisorResponse:
 
 @dataclass
 class LLMSettings:
+    provider: str
     client: Optional[LLMClient]
     model: Optional[str]
     temperature: float
@@ -269,7 +351,10 @@ class LLMClient:
     """Minimal client for OpenAI-compatible chat endpoints (vLLM, Ollama, etc.)."""
 
     def __init__(self, base_url: str, model: str, api_key: Optional[str] = None) -> None:
-        self.base_url = base_url.rstrip("/")
+        normalized = base_url.rstrip("/")
+        if normalized.endswith("/v1"):
+            normalized = normalized[: -len("/v1")]
+        self.base_url = normalized
         self.model = model
         self.api_key = api_key
 
@@ -996,6 +1081,9 @@ def render_sidebar() -> None:
         should return quantitative recommendations backed by citations.
         """
     )
+    st.sidebar.caption(
+        "Tip: Create a .env file with values such as GROQ_API_KEY and GROQ_MODEL to pre-populate the Groq connection."
+    )
     st.sidebar.info(
         "All results are educational and should be validated with a licensed professional."
     )
@@ -1005,12 +1093,14 @@ def render_llm_settings() -> LLMSettings:
     st.sidebar.subheader("LLM connection")
 
     defaults = {
+        "llm_provider": DEFAULT_PROVIDER if DEFAULT_PROVIDER in PROVIDER_PRESETS else "Groq",
         "llm_base_url": "",
         "llm_model": "",
         "llm_api_key": "",
         "llm_temperature": 0.2,
         "llm_max_tokens": 6000,
         "show_load_settings": False,
+        "_llm_defaults_applied": False,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -1020,8 +1110,36 @@ def render_llm_settings() -> LLMSettings:
         for key, value in pending_settings.items():
             st.session_state[key] = value
 
+    provider = st.session_state.get("llm_provider", DEFAULT_PROVIDER)
+    if provider not in PROVIDER_PRESETS:
+        provider = "Custom"
+        st.session_state["llm_provider"] = provider
+
+    if not st.session_state.get("_llm_defaults_applied", False):
+        apply_provider_defaults_to_session(provider, overwrite=False)
+        st.session_state["_llm_defaults_applied"] = True
+
     if st.session_state.pop("settings_loaded_success", False):
         st.sidebar.success("Settings loaded.")
+
+    def _on_provider_change() -> None:
+        selected = st.session_state.get("llm_provider", "Custom")
+        if selected not in PROVIDER_PRESETS:
+            selected = "Custom"
+            st.session_state["llm_provider"] = selected
+        apply_provider_defaults_to_session(selected, overwrite=True)
+
+    provider_options = list(PROVIDER_PRESETS.keys())
+    st.sidebar.selectbox(
+        "Provider",
+        provider_options,
+        key="llm_provider",
+        on_change=_on_provider_change,
+        help="Choose Groq for hosted inference, Ollama for local models, or Custom to supply another endpoint.",
+    )
+    st.sidebar.caption(
+        "Groq requests use https://api.groq.com/openai by default. Ollama typically listens on http://localhost:11434."
+    )
 
     base_url = st.sidebar.text_input(
         "Base URL",
@@ -1084,6 +1202,10 @@ def render_llm_settings() -> LLMSettings:
                 profile_blob = loaded.get("profile", {})
 
                 st.session_state["pending_llm_settings"] = {
+                    "llm_provider": llm_blob.get(
+                        "provider",
+                        st.session_state["llm_provider"],
+                    ),
                     "llm_base_url": llm_blob.get("base_url", st.session_state["llm_base_url"]),
                     "llm_model": llm_blob.get("model", st.session_state["llm_model"]),
                     "llm_api_key": llm_blob.get("api_key", st.session_state["llm_api_key"]),
@@ -1117,6 +1239,7 @@ def render_llm_settings() -> LLMSettings:
                 st.sidebar.error(f"Failed to load settings: {exc}")
 
     current_settings = {
+        "provider": st.session_state.get("llm_provider", "Custom"),
         "base_url": st.session_state.get("llm_base_url", ""),
         "model": st.session_state.get("llm_model", ""),
         "api_key": st.session_state.get("llm_api_key", ""),
@@ -1147,6 +1270,7 @@ def render_llm_settings() -> LLMSettings:
         )
 
     return LLMSettings(
+        provider=current_settings["provider"],
         client=client,
         model=current_settings["model"] or None,
         temperature=current_settings["temperature"],
