@@ -248,6 +248,21 @@ UNICODE_PUNCT_TRANSLATION = {
 }
 
 CURRENCY_TIGHT_PATTERN = re.compile(r"\$(?=[0-9-])")
+ORDERED_LIST_PATTERN = re.compile(r"\d+[.)]\s")
+URL_PATTERN = re.compile(r"(?P<prefix>^|\s)(?P<url>https?://[^\s<>()]+)")
+
+
+def _linkify_line(line: str) -> str:
+    """Wrap bare URLs in angle brackets so Markdown renders them as links."""
+
+    def _replace(match: re.Match) -> str:
+        prefix = match.group("prefix")
+        url = match.group("url")
+        trimmed = url.rstrip(").,;:")
+        trailing = url[len(trimmed) :]
+        return f"{prefix}<{trimmed}>{trailing}"
+
+    return URL_PATTERN.sub(_replace, line)
 
 
 class LLMClient:
@@ -350,6 +365,15 @@ def normalize_plaintext_block(text: str) -> str:
             UNICODE_PUNCT_TRANSLATION
         )
         normalized = CURRENCY_TIGHT_PATTERN.sub("$ ", normalized)
+        normalized = _linkify_line(normalized)
+
+        if normalized and (
+            normalized.startswith("- ")
+            or ORDERED_LIST_PATTERN.match(normalized)
+        ):
+            if normalized_lines and normalized_lines[-1].strip():
+                normalized_lines.append("")
+
         normalized_lines.append(normalized)
 
     return "\n".join(normalized_lines)
@@ -1500,7 +1524,7 @@ def render_narrative(response: AdvisorResponse) -> None:
         st.header("Narrative Summary")
         narrative_text = normalize_plaintext_block(response.narrative)
         if narrative_text.strip():
-            st.text(narrative_text)
+            st.markdown(narrative_text)
         else:
             st.info("The model did not include a narrative summary.")
 
@@ -1553,7 +1577,7 @@ def main() -> None:
             with st.expander("Model reasoning"):
                 reasoning_text = normalize_plaintext_block(reasoning_trace)
                 if reasoning_text.strip():
-                    st.text(reasoning_text)
+                    st.markdown(reasoning_text)
         if raw_response is not None:
             with st.expander("Raw LLM response"):
                 serialized = json.dumps(raw_response, indent=2)
@@ -1576,7 +1600,7 @@ def main() -> None:
         with st.expander("Model reasoning", expanded=False):
             reasoning_text = normalize_plaintext_block(reasoning_trace)
             if reasoning_text.strip():
-                st.text(reasoning_text)
+                st.markdown(reasoning_text)
 
     if raw_response is not None:
         with st.expander("Raw LLM response", expanded=False):
