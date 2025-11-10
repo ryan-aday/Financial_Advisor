@@ -4,6 +4,7 @@ import ast
 import json
 import re
 import textwrap
+import unicodedata
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional
@@ -221,6 +222,22 @@ LLM_REQUEST_TIMEOUT = 300
 
 PDF_LINES_PER_PAGE = 45
 
+UNICODE_PUNCT_TRANSLATION = {
+    ord("–"): "-",
+    ord("—"): "-",
+    ord("−"): "-",
+    ord("‑"): "-",
+    ord("“"): '"',
+    ord("”"): '"',
+    ord("„"): '"',
+    ord("‘"): "'",
+    ord("’"): "'",
+    ord("‚"): "'",
+    ord("•"): "-",
+    ord("·"): "-",
+    ord("…"): "...",
+}
+
 
 class LLMClient:
     """Minimal client for OpenAI-compatible chat endpoints (vLLM, Ollama, etc.)."""
@@ -235,7 +252,11 @@ class LLMClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        endpoint = f"{self.base_url}/v1/chat/completions"
+        base = self.base_url.rstrip("/")
+        if base.endswith("/v1"):
+            endpoint = f"{base}/chat/completions"
+        else:
+            endpoint = f"{base}/v1/chat/completions"
         response = requests.post(
             endpoint,
             headers=headers,
@@ -310,7 +331,8 @@ def normalize_markdown_line(line: str) -> str:
 def sanitize_pdf_line(line: str) -> str:
     """Escape characters that are not safe in a PDF text run."""
 
-    safe = line.replace("\r", "")
+    safe = unicodedata.normalize("NFKC", line).translate(UNICODE_PUNCT_TRANSLATION)
+    safe = safe.replace("\r", "")
     safe = safe.encode("ascii", "replace").decode("ascii")
     safe = safe.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
     return safe if safe.strip() else " "
