@@ -328,6 +328,20 @@ def normalize_markdown_line(line: str) -> str:
     return normalized
 
 
+def normalize_plaintext_block(text: str) -> str:
+    """Convert Markdown-like content into sanitized plain text for on-screen display."""
+
+    normalized_lines: List[str] = []
+    for raw_line in text.splitlines():
+        normalized = normalize_markdown_line(raw_line)
+        normalized = unicodedata.normalize("NFKC", normalized).translate(
+            UNICODE_PUNCT_TRANSLATION
+        )
+        normalized_lines.append(normalized)
+
+    return "\n".join(normalized_lines)
+
+
 def sanitize_pdf_line(line: str) -> str:
     """Escape characters that are not safe in a PDF text run."""
 
@@ -1381,12 +1395,8 @@ def render_summary(profile: FinancialProfile) -> None:
     col2.metric("Total Debt", f"${profile.total_debt:,.0f}")
     col3.metric("Net Worth", f"${profile.net_worth:,.0f}")
 
-    st.markdown(
-        (
-            f"**Monthly take-home estimate:** ${profile.monthly_income:,.0f}  "
-            f"•  **Recurring costs:** ${profile.recurring_costs:,.0f}"
-        )
-    )
+    st.markdown(f"**Monthly take-home estimate:** ${profile.monthly_income:,.0f}  ")
+    st.markdown(f"**Recurring costs:** ${profile.recurring_costs:,.0f}")
 
     if profile.estate_documents:
         st.caption(f"Estate planning documents noted: {profile.estate_documents}")
@@ -1475,7 +1485,11 @@ def render_catastrophic_section(items: List[AdvisorCatastrophicPlan]) -> None:
 def render_narrative(response: AdvisorResponse) -> None:
     if response.narrative:
         st.header("Narrative Summary")
-        st.write(response.narrative)
+        narrative_text = normalize_plaintext_block(response.narrative)
+        if narrative_text.strip():
+            st.text(narrative_text)
+        else:
+            st.info("The model did not include a narrative summary.")
 
     if response.sources:
         st.subheader("Citations")
@@ -1524,7 +1538,9 @@ def main() -> None:
         st.error(f"Failed to generate plan: {exc}")
         if reasoning_trace:
             with st.expander("Model reasoning"):
-                st.write(reasoning_trace)
+                reasoning_text = normalize_plaintext_block(reasoning_trace)
+                if reasoning_text.strip():
+                    st.text(reasoning_text)
         if raw_response is not None:
             with st.expander("Raw LLM response"):
                 serialized = json.dumps(raw_response, indent=2)
@@ -1545,7 +1561,9 @@ def main() -> None:
 
     if reasoning_trace:
         with st.expander("Model reasoning", expanded=False):
-            st.write(reasoning_trace)
+            reasoning_text = normalize_plaintext_block(reasoning_trace)
+            if reasoning_text.strip():
+                st.text(reasoning_text)
 
     if raw_response is not None:
         with st.expander("Raw LLM response", expanded=False):
