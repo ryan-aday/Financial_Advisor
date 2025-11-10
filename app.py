@@ -223,10 +223,13 @@ LLM_REQUEST_TIMEOUT = 300
 PDF_LINES_PER_PAGE = 45
 
 UNICODE_PUNCT_TRANSLATION = {
+    ord("‐"): "-",
+    ord("‑"): "-",
+    ord("‒"): "-",
     ord("–"): "-",
     ord("—"): "-",
+    ord("―"): "-",
     ord("−"): "-",
-    ord("‑"): "-",
     ord("“"): '"',
     ord("”"): '"',
     ord("„"): '"',
@@ -236,7 +239,15 @@ UNICODE_PUNCT_TRANSLATION = {
     ord("•"): "-",
     ord("·"): "-",
     ord("…"): "...",
+    ord(" "): " ",  # Non-breaking space
+    ord(" "): " ",  # Narrow non-breaking space
+    ord(" "): " ",
+    ord(" "): " ",
+    ord(" "): " ",
+    ord(" "): " ",
 }
+
+CURRENCY_TIGHT_PATTERN = re.compile(r"\$(?=[0-9-])")
 
 
 class LLMClient:
@@ -315,16 +326,17 @@ def normalize_markdown_line(line: str) -> str:
 
     if stripped.startswith(('# ', '## ', '### ')):
         stripped = stripped.lstrip('# ').strip()
-        return (" " * leading_spaces) + stripped
-
-    if stripped.startswith(('- ', '* ')):
+        normalized = (" " * leading_spaces) + stripped
+    elif stripped.startswith(('- ', '* ')):
         content = stripped[2:]
-        return (" " * leading_spaces) + f"- {content}"
-
-    if stripped.startswith('> '):
+        normalized = (" " * leading_spaces) + f"- {content}"
+    elif stripped.startswith('> '):
         content = stripped[2:]
-        return (" " * leading_spaces) + f"Quote: {content}"
+        normalized = (" " * leading_spaces) + f"Quote: {content}"
 
+    normalized = re.sub(r"(?<!\\)\*(?!\*)(.+?)(?<!\\)\*", r"\1", normalized)
+    normalized = re.sub(r"(?<!\\)_(?!_)(.+?)(?<!\\)_", r"\1", normalized)
+    normalized = CURRENCY_TIGHT_PATTERN.sub("$ ", normalized)
     return normalized
 
 
@@ -337,6 +349,7 @@ def normalize_plaintext_block(text: str) -> str:
         normalized = unicodedata.normalize("NFKC", normalized).translate(
             UNICODE_PUNCT_TRANSLATION
         )
+        normalized = CURRENCY_TIGHT_PATTERN.sub("$ ", normalized)
         normalized_lines.append(normalized)
 
     return "\n".join(normalized_lines)
